@@ -290,6 +290,97 @@ if [ "$OSFLAVOUR" != "ubuntu" ] && [ "$OSFLAVOUR" != "debian" ] && [ "$OSFLAVOUR
     fi
 fi
 
+# Install Ruby and Bundler (required for AssetSonar connector)
+printBanner "Ruby Installation"
+logmsg "Installing Ruby and Bundler for AssetSonar connector compatibility..."
+
+# Check if Ruby is already installed and meets version requirements
+if command -v ruby >/dev/null 2>&1; then
+    ruby_version=$(ruby --version | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    ruby_major=$(echo "$ruby_version" | cut -d. -f1)
+    ruby_minor=$(echo "$ruby_version" | cut -d. -f2)
+    logmsg "Ruby is already installed: version $ruby_version"
+
+    # Check if version is at least 2.7
+    if [ "$ruby_major" -gt 2 ] || ([ "$ruby_major" -eq 2 ] && [ "$ruby_minor" -ge 7 ]); then
+        logmsg "Ruby version $ruby_version meets the minimum requirement (2.7+)."
+    else
+        logmsg "Ruby version $ruby_version is below the minimum requirement (2.7+). Installing newer version..."
+        install_ruby=true
+    fi
+else
+    logmsg "Ruby is not installed. Installing Ruby..."
+    install_ruby=true
+fi
+
+# Install Ruby if needed
+if [ "$install_ruby" = "true" ]; then
+    if [ "$OSFLAVOUR" = "redhat" ]; then
+        if [ "$OS_MAJOR" -ge 8 ]; then
+            # For RHEL 8+, use dnf and enable EPEL for Ruby 2.7+
+            execPrint "dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-$OS_MAJOR.noarch.rpm"
+            execPrint "dnf -y install ruby ruby-devel rubygems"
+        else
+            # For older RHEL versions, try to get Ruby 2.7+ from SCL
+            execPrint "yum -y install centos-release-scl"
+            execPrint "yum -y install rh-ruby27 rh-ruby27-ruby-devel"
+            # Enable SCL Ruby
+            execPrint "scl enable rh-ruby27 bash -c 'echo \"source /opt/rh/rh-ruby27/enable\" >> /etc/profile.d/ruby.sh'"
+        fi
+    elif [ "$OSFLAVOUR" = "debian" ] || [ "$OSFLAVOUR" = "ubuntu" ]; then
+        if [ "$OS_MAJOR" -ge 20 ] || [ "$OSFLAVOUR" = "debian" ] && [ "$OS_MAJOR" -ge 11 ]; then
+            # For Ubuntu 20+ and Debian 11+, use standard packages (Ruby 2.7+)
+            execPrint "apt-get update -qq 2>&1"
+            execPrint "apt-get -yq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install ruby ruby-dev rubygems"
+        else
+            # For older versions, add Brightbox PPA for Ruby 2.7
+            execPrint "apt-get update -qq 2>&1"
+            execPrint "apt-get -yq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install software-properties-common"
+            execPrint "apt-add-repository -y ppa:brightbox/ruby-ng"
+            execPrint "apt-get update -qq 2>&1"
+            execPrint "apt-get -yq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install ruby2.7 ruby2.7-dev"
+        fi
+    fi
+
+    # Verify installation
+    if command -v ruby >/dev/null 2>&1; then
+        ruby_version=$(ruby --version | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        ruby_major=$(echo "$ruby_version" | cut -d. -f1)
+        ruby_minor=$(echo "$ruby_version" | cut -d. -f2)
+        logmsg "Ruby installation successful: version $ruby_version"
+
+        if [ "$ruby_major" -gt 2 ] || ([ "$ruby_major" -eq 2 ] && [ "$ruby_minor" -ge 7 ]); then
+            logmsg "Ruby version $ruby_version meets the minimum requirement (2.7+)."
+        else
+            logmsg "ERROR: Ruby installation failed to meet version requirements."
+            exit 1
+        fi
+    else
+        logmsg "ERROR: Ruby installation failed."
+        exit 1
+    fi
+fi
+
+# Install Bundler if not already present
+if ! command -v bundle >/dev/null 2>&1; then
+    logmsg "Installing Bundler..."
+    if [ "$OSFLAVOUR" = "redhat" ]; then
+        execPrint "gem install bundler"
+    elif [ "$OSFLAVOUR" = "debian" ] || [ "$OSFLAVOUR" = "ubuntu" ]; then
+        execPrint "gem install bundler"
+    fi
+
+    # Verify bundler installation
+    if command -v bundle >/dev/null 2>&1; then
+        logmsg "Bundler installation successful."
+    else
+        logmsg "ERROR: Bundler installation failed."
+        exit 1
+    fi
+else
+    logmsg "Bundler is already installed."
+fi
+
 SELINUX_STATUS=$(getenforce 2>/dev/null)
 HTTPD_T_STATUS=$(semanage permissive -l 2>/dev/null | grep httpd_t)
 if [ -n "$SELINUX_STATUS" ]; then

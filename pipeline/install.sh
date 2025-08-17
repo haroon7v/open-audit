@@ -1103,6 +1103,95 @@ https://community.opmantek.com/display/OA/Release+Notes+for+Open-AudIT+v$VERSION
 
 fi
 
+# --- AssetSonar Connector Installation Section ---
+if [ -n "$UNATTENDED" ]; then
+    agent_tag="${ASSETSONAR_AGENT_TAG:-TAG}"
+    assetsonar_url="${ASSETSONAR_URL:-URL}"
+    if [ -z "$agent_tag" ] || [ -z "$assetsonar_url" ]; then
+        logmsg "ERROR: ASSETSONAR_AGENT_TAG and ASSETSONAR_URL must be provided in unattended mode."
+        exit 1
+    fi
+else
+    input_text "Enter Assetsonar Tag: "
+    agent_tag="$RESPONSE"
+    [ -z "$agent_tag" ] && agent_tag="TAG"
+    if [ -z "$agent_tag" ]; then
+        logmsg "ERROR: agent_tag is required."
+        exit 1
+    fi
+
+    input_text "Enter Assetsonar URL: "
+    assetsonar_url="$RESPONSE"
+    [ -z "$assetsonar_url" ] && assetsonar_url="URL"
+    if [ -z "$assetsonar_url" ]; then
+        logmsg "ERROR: assetsonar_url is required."
+        exit 1
+    fi
+fi
+
+config_file="/var/lib/assetsonar-connector/config.ini"
+
+# Remove any previous connector installation
+execPrint "rm -rf /opt/assetsonar-connector"
+# Remove connector-related crontab entries
+crontab -l 2>/dev/null | grep -v '/opt/assetsonar-connector' | crontab -
+
+# Extract connector files
+execPrint "tar -xvzf \"connector/connector.tar.gz\" -C /opt"
+
+# Set permissions
+execPrint "chmod +x /opt/assetsonar-connector/scripts/execute_discoveries.sh"
+execPrint "chmod +x /opt/assetsonar-connector/scripts/force_sync.sh"
+execPrint "chmod +x /opt/assetsonar-connector/scripts/sync.sh"
+execPrint "chmod +x /opt/assetsonar-connector/bin/assetsonar_syncer"
+
+# Create required directories
+execPrint "mkdir -p /var/lib/assetsonar-connector"
+execPrint "mkdir -p /var/log/assetsonar-connector"
+
+# Setup crontab for connector
+command_sync="/opt/assetsonar-connector/bin/assetsonar_syncer -s"
+command_execute="/opt/assetsonar-connector/bin/assetsonar_syncer -e"
+(crontab -l 2>/dev/null; echo "0 * * * * $command_sync") | sort -u | crontab -
+(crontab -l 2>/dev/null; echo "0 * * * * $command_execute") | sort -u | crontab -
+
+# Write config file
+cat <<EOF > $config_file
+[Assetsonar]
+url = $assetsonar_url
+tag = $agent_tag
+
+[OpenAudit]
+sync_enabled = true
+url = http://localhost/open-audit/index.php
+username = admin
+password = password
+system_id = System1 # If you plan to install multiple instances of Open Audit, make sure this value is unique for each respective installation of the connector application. Do not leave this empty.
+EOF
+
+# Integration Health Check
+apache_status=$( systemctl is-active apache2 2>/dev/null )
+open_audit_status=$( [ -d /var/www/html/open-audit ] && echo true || echo false )
+health_check_payload=$(cat <<EOF
+{
+  "api_type": "open_audit",
+  "apache_status": "$apache_status",
+  "open_audit_installed": "$open_audit_status",
+  "itam_access_token": "$agent_tag",
+  "source": "install"
+}
+EOF
+)
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d "$health_check_payload" \
+  "$assetsonar_url/api/api_integration/health_check.api" \
+  > /dev/null 2>&1 &
+
+printBanner "AssetSonar connector has been installed"
+logmsg "Use steps listed in the guide to configure the AssetSonar connector"
+# --- End AssetSonar Connector Installation Section ---
+
 printBanner "All Done!"
 
 logmsg "Open-AudIT should now be accessible at

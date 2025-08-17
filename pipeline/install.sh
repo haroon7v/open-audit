@@ -290,6 +290,97 @@ if [ "$OSFLAVOUR" != "ubuntu" ] && [ "$OSFLAVOUR" != "debian" ] && [ "$OSFLAVOUR
     fi
 fi
 
+# Install Ruby and Bundler (required for AssetSonar connector)
+printBanner "Ruby Installation"
+logmsg "Installing Ruby and Bundler for AssetSonar connector compatibility..."
+
+# Check if Ruby is already installed and meets version requirements
+if command -v ruby >/dev/null 2>&1; then
+    ruby_version=$(ruby --version | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    ruby_major=$(echo "$ruby_version" | cut -d. -f1)
+    ruby_minor=$(echo "$ruby_version" | cut -d. -f2)
+    logmsg "Ruby is already installed: version $ruby_version"
+
+    # Check if version is at least 2.7
+    if [ "$ruby_major" -gt 2 ] || ([ "$ruby_major" -eq 2 ] && [ "$ruby_minor" -ge 7 ]); then
+        logmsg "Ruby version $ruby_version meets the minimum requirement (2.7+)."
+    else
+        logmsg "Ruby version $ruby_version is below the minimum requirement (2.7+). Installing newer version..."
+        install_ruby=true
+    fi
+else
+    logmsg "Ruby is not installed. Installing Ruby..."
+    install_ruby=true
+fi
+
+# Install Ruby if needed
+if [ "$install_ruby" = "true" ]; then
+    if [ "$OSFLAVOUR" = "redhat" ]; then
+        if [ "$OS_MAJOR" -ge 8 ]; then
+            # For RHEL 8+, use dnf and enable EPEL for Ruby 2.7+
+            execPrint "dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-$OS_MAJOR.noarch.rpm"
+            execPrint "dnf -y install ruby ruby-devel rubygems"
+        else
+            # For older RHEL versions, try to get Ruby 2.7+ from SCL
+            execPrint "yum -y install centos-release-scl"
+            execPrint "yum -y install rh-ruby27 rh-ruby27-ruby-devel"
+            # Enable SCL Ruby
+            execPrint "scl enable rh-ruby27 bash -c 'echo \"source /opt/rh/rh-ruby27/enable\" >> /etc/profile.d/ruby.sh'"
+        fi
+    elif [ "$OSFLAVOUR" = "debian" ] || [ "$OSFLAVOUR" = "ubuntu" ]; then
+        if [ "$OS_MAJOR" -ge 20 ] || [ "$OSFLAVOUR" = "debian" ] && [ "$OS_MAJOR" -ge 11 ]; then
+            # For Ubuntu 20+ and Debian 11+, use standard packages (Ruby 2.7+)
+            execPrint "apt-get update -qq 2>&1"
+            execPrint "apt-get -yq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install ruby ruby-dev rubygems"
+        else
+            # For older versions, add Brightbox PPA for Ruby 2.7
+            execPrint "apt-get update -qq 2>&1"
+            execPrint "apt-get -yq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install software-properties-common"
+            execPrint "apt-add-repository -y ppa:brightbox/ruby-ng"
+            execPrint "apt-get update -qq 2>&1"
+            execPrint "apt-get -yq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install ruby2.7 ruby2.7-dev"
+        fi
+    fi
+
+    # Verify installation
+    if command -v ruby >/dev/null 2>&1; then
+        ruby_version=$(ruby --version | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        ruby_major=$(echo "$ruby_version" | cut -d. -f1)
+        ruby_minor=$(echo "$ruby_version" | cut -d. -f2)
+        logmsg "Ruby installation successful: version $ruby_version"
+
+        if [ "$ruby_major" -gt 2 ] || ([ "$ruby_major" -eq 2 ] && [ "$ruby_minor" -ge 7 ]); then
+            logmsg "Ruby version $ruby_version meets the minimum requirement (2.7+)."
+        else
+            logmsg "ERROR: Ruby installation failed to meet version requirements."
+            exit 1
+        fi
+    else
+        logmsg "ERROR: Ruby installation failed."
+        exit 1
+    fi
+fi
+
+# Install Bundler if not already present
+if ! command -v bundle >/dev/null 2>&1; then
+    logmsg "Installing Bundler..."
+    if [ "$OSFLAVOUR" = "redhat" ]; then
+        execPrint "gem install bundler"
+    elif [ "$OSFLAVOUR" = "debian" ] || [ "$OSFLAVOUR" = "ubuntu" ]; then
+        execPrint "gem install bundler"
+    fi
+
+    # Verify bundler installation
+    if command -v bundle >/dev/null 2>&1; then
+        logmsg "Bundler installation successful."
+    else
+        logmsg "ERROR: Bundler installation failed."
+        exit 1
+    fi
+else
+    logmsg "Bundler is already installed."
+fi
+
 SELINUX_STATUS=$(getenforce 2>/dev/null)
 HTTPD_T_STATUS=$(semanage permissive -l 2>/dev/null | grep httpd_t)
 if [ -n "$SELINUX_STATUS" ]; then
@@ -1011,6 +1102,95 @@ You will find more information in the release notes at
 https://community.opmantek.com/display/OA/Release+Notes+for+Open-AudIT+v$VERSION"
 
 fi
+
+# --- AssetSonar Connector Installation Section ---
+if [ -n "$UNATTENDED" ]; then
+    agent_tag="${ASSETSONAR_AGENT_TAG:-TAG}"
+    assetsonar_url="${ASSETSONAR_URL:-URL}"
+    if [ -z "$agent_tag" ] || [ -z "$assetsonar_url" ]; then
+        logmsg "ERROR: ASSETSONAR_AGENT_TAG and ASSETSONAR_URL must be provided in unattended mode."
+        exit 1
+    fi
+else
+    input_text "Enter Assetsonar Tag: "
+    agent_tag="$RESPONSE"
+    [ -z "$agent_tag" ] && agent_tag="TAG"
+    if [ -z "$agent_tag" ]; then
+        logmsg "ERROR: agent_tag is required."
+        exit 1
+    fi
+
+    input_text "Enter Assetsonar URL: "
+    assetsonar_url="$RESPONSE"
+    [ -z "$assetsonar_url" ] && assetsonar_url="URL"
+    if [ -z "$assetsonar_url" ]; then
+        logmsg "ERROR: assetsonar_url is required."
+        exit 1
+    fi
+fi
+
+config_file="/var/lib/assetsonar-connector/config.ini"
+
+# Remove any previous connector installation
+execPrint "rm -rf /opt/assetsonar-connector"
+# Remove connector-related crontab entries
+crontab -l 2>/dev/null | grep -v '/opt/assetsonar-connector' | crontab -
+
+# Extract connector files
+execPrint "tar -xvzf \"connector/connector.tar.gz\" -C /opt"
+
+# Set permissions
+execPrint "chmod +x /opt/assetsonar-connector/scripts/execute_discoveries.sh"
+execPrint "chmod +x /opt/assetsonar-connector/scripts/force_sync.sh"
+execPrint "chmod +x /opt/assetsonar-connector/scripts/sync.sh"
+execPrint "chmod +x /opt/assetsonar-connector/bin/assetsonar_syncer"
+
+# Create required directories
+execPrint "mkdir -p /var/lib/assetsonar-connector"
+execPrint "mkdir -p /var/log/assetsonar-connector"
+
+# Setup crontab for connector
+command_sync="/opt/assetsonar-connector/bin/assetsonar_syncer -s"
+command_execute="/opt/assetsonar-connector/bin/assetsonar_syncer -e"
+(crontab -l 2>/dev/null; echo "0 * * * * $command_sync") | sort -u | crontab -
+(crontab -l 2>/dev/null; echo "0 * * * * $command_execute") | sort -u | crontab -
+
+# Write config file
+cat <<EOF > $config_file
+[Assetsonar]
+url = $assetsonar_url
+tag = $agent_tag
+
+[OpenAudit]
+sync_enabled = true
+url = http://localhost/open-audit/index.php
+username = admin
+password = password
+system_id = System1 # If you plan to install multiple instances of Open Audit, make sure this value is unique for each respective installation of the connector application. Do not leave this empty.
+EOF
+
+# Integration Health Check
+apache_status=$( systemctl is-active apache2 2>/dev/null )
+open_audit_status=$( [ -d /var/www/html/open-audit ] && echo true || echo false )
+health_check_payload=$(cat <<EOF
+{
+  "api_type": "open_audit",
+  "apache_status": "$apache_status",
+  "open_audit_installed": "$open_audit_status",
+  "itam_access_token": "$agent_tag",
+  "source": "install"
+}
+EOF
+)
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d "$health_check_payload" \
+  "$assetsonar_url/api/api_integration/health_check.api" \
+  > /dev/null 2>&1 &
+
+printBanner "AssetSonar connector has been installed"
+logmsg "Use steps listed in the guide to configure the AssetSonar connector"
+# --- End AssetSonar Connector Installation Section ---
 
 printBanner "All Done!"
 
